@@ -27,6 +27,9 @@ type Engine struct {
 	timer   *Timer
 	meta    *MetaManager
 	monitor *SizeMonitor
+	// number of seconds. when job's delay second is greater than pumpStorageThresh,
+	//it will be written to storage if enabled
+	storageThresh uint32
 }
 
 func NewEngine(redisName string, conn *go_redis.Client) (engine.Engine, error) {
@@ -52,16 +55,18 @@ func NewEngine(redisName string, conn *go_redis.Client) (engine.Engine, error) {
 	}
 	monitor := NewSizeMonitor(redis, timer, metadata)
 	go monitor.Loop()
-	return &Engine{
+	eng := &Engine{
 		redis:   redis,
 		pool:    NewPool(redis),
 		timer:   timer,
 		meta:    meta,
 		monitor: monitor,
-	}, nil
+	}
+	return eng, nil
 }
 
-func (e *Engine) Publish(namespace, queue string, body []byte, ttlSecond, delaySecond uint32, tries uint16) (jobID string, err error) {
+func (e *Engine) Publish(job engine.Job) (jobID string, err error) {
+	namespace, queue, delaySecond, tries := job.Namespace(), job.Queue(), job.Delay(), job.Tries()
 	defer func() {
 		if err == nil {
 			metrics.publishJobs.WithLabelValues(e.redis.Name).Inc()
@@ -70,7 +75,6 @@ func (e *Engine) Publish(namespace, queue string, body []byte, ttlSecond, delayS
 	}()
 	e.meta.RecordIfNotExist(namespace, queue)
 	e.monitor.MonitorIfNotExist(namespace, queue)
-	job := engine.NewJob(namespace, queue, body, ttlSecond, delaySecond, tries)
 	if tries == 0 {
 		return job.ID(), nil
 	}

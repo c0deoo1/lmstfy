@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,19 +11,23 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
+	"go.uber.org/automaxprocs/maxprocs"
+
 	"github.com/bitleak/lmstfy/auth"
 	"github.com/bitleak/lmstfy/config"
+	"github.com/bitleak/lmstfy/engine"
 	"github.com/bitleak/lmstfy/engine/migration"
 	redis_engine "github.com/bitleak/lmstfy/engine/redis"
+	"github.com/bitleak/lmstfy/engine/redis_v2"
 	"github.com/bitleak/lmstfy/helper"
 	"github.com/bitleak/lmstfy/log"
 	"github.com/bitleak/lmstfy/server/handlers"
 	"github.com/bitleak/lmstfy/server/middleware"
+	"github.com/bitleak/lmstfy/storage"
 	"github.com/bitleak/lmstfy/throttler"
 	"github.com/bitleak/lmstfy/version"
-	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
-	"go.uber.org/automaxprocs/maxprocs"
 )
 
 type optionFlags struct {
@@ -157,6 +162,25 @@ func postValidateConfig(ctx context.Context, conf *config.Config) error {
 	return nil
 }
 
+func setupEngines(conf *config.Config, l *logrus.Logger) error {
+	redis_engine.SetLogger(l)
+	if err := redis_engine.Setup(conf); err != nil {
+		return fmt.Errorf("%w in redis engine", err)
+	}
+	redis_v2.SetLogger(l)
+	if err := redis_v2.Setup(conf); err != nil {
+		return fmt.Errorf("%w in redis v2 engine", err)
+	}
+	migration.SetLogger(l)
+	if err := migration.Setup(conf); err != nil {
+		return fmt.Errorf("%w in migration engine", err)
+	}
+	if engine.GetEngine(config.DefaultPoolName) == nil {
+		return errors.New("missing default pool")
+	}
+	return nil
+}
+
 func main() {
 	parseFlags()
 	if Flags.ShowVersion {
@@ -171,21 +195,26 @@ func main() {
 		panic(fmt.Sprintf("Failed to post validate the config file: %s", err))
 	}
 	shutdown := make(chan struct{})
-	accessLogger, errorLogger, err := log.SetupLogger(conf.LogFormat, conf.LogDir, conf.LogLevel, Flags.BackTrackLevel)
+	err = log.Setup(conf.LogFormat, conf.LogDir, conf.LogLevel, Flags.BackTrackLevel)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to setup logger: %s", err))
 	}
+
+	logger := log.Get()
 	maxprocs.Logger(func(format string, args ...interface{}) {
-		errorLogger.Infof(format, args...)
+		logger.Infof(format, args...)
 	})
 	registerSignal(shutdown, func() {
-		log.ReopenLogs(conf.LogDir, accessLogger, errorLogger)
+		log.ReopenLogs(conf.LogDir)
 	})
-	if err := redis_engine.Setup(conf, errorLogger); err != nil {
-		panic(fmt.Sprintf("Failed to setup redis engine: %s", err))
+	// set up data manager
+	if conf.HasSecondaryStorage() {
+		if err := storage.Init(conf); err != nil {
+			panic(fmt.Sprintf("Failed to init data manager for secondary storage: %s", err))
+		}
 	}
-	if err := migration.Setup(conf, errorLogger); err != nil {
-		panic(fmt.Sprintf("Failed to setup migration engine: %s", err))
+	if err := setupEngines(conf, logger); err != nil {
+		panic(fmt.Sprintf("Failed to setup engines, err: %s", err.Error()))
 	}
 	if err := auth.Setup(conf); err != nil {
 		panic(fmt.Sprintf("Failed to setup auth module: %s", err))
@@ -193,17 +222,18 @@ func main() {
 	if conf.EnableAccessLog {
 		middleware.EnableAccessLog()
 	}
-	apiSrv := apiServer(conf, accessLogger, errorLogger, Flags.SkipVerification)
-	adminSrv := adminServer(conf, accessLogger, errorLogger)
+	apiSrv := apiServer(conf, log.GetAccessLogger(), logger, Flags.SkipVerification)
+	adminSrv := adminServer(conf, log.GetAccessLogger(), logger)
 
-	createPidFile(errorLogger)
+	createPidFile(logger)
 
 	<-shutdown
-	errorLogger.Infof("[%d] Shutting down...", os.Getpid())
+	logger.Infof("[%d] Shutting down...", os.Getpid())
 	removePidFile()
 	adminSrv.Close() // Admin server does not need to be stopped gracefully
 	apiSrv.Shutdown(context.Background())
 
+	storage.Get().Shutdown()
 	throttler.GetThrottler().Shutdown()
-	errorLogger.Infof("[%d] Bye bye", os.Getpid())
+	logger.Infof("[%d] Bye bye", os.Getpid())
 }

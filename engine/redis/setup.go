@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -21,10 +20,18 @@ var (
 	dummyCtx = context.TODO()
 )
 
-// Setup set the essential config of redis engine
-func Setup(conf *config.Config, l *logrus.Logger) error {
+// SetLogger will set the logger for engine
+func SetLogger(l *logrus.Logger) {
 	logger = l
+}
+
+// Setup set the essential config of redis engine
+func Setup(conf *config.Config) error {
 	for name, poolConf := range conf.Pool {
+		if len(poolConf.Version) != 0 {
+			continue
+		}
+
 		if poolConf.PoolSize == 0 {
 			poolConf.PoolSize = MaxRedisConnections
 		}
@@ -38,14 +45,12 @@ func Setup(conf *config.Config, l *logrus.Logger) error {
 		if cli.Ping(dummyCtx).Err() != nil {
 			return fmt.Errorf("redis server %s was not alive", poolConf.Addr)
 		}
+
 		e, err := NewEngine(name, cli)
 		if err != nil {
 			return fmt.Errorf("setup engine error: %s", err)
 		}
 		engine.Register(engine.KindRedis, name, e)
-	}
-	if engine.GetEngineByKind(engine.KindRedis, "") == nil {
-		return errors.New("default redis engine not found")
 	}
 	return nil
 }

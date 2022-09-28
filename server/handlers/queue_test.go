@@ -190,10 +190,7 @@ func TestPeekQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to decode response")
 	}
-	if data.JobID != jobID {
-		t.Log(resp.Body.String())
-		t.Fatal("Mismatched job")
-	}
+	assert.Equal(t, jobID, data.JobID)
 }
 
 func TestSize(t *testing.T) {
@@ -483,7 +480,7 @@ func TestRePublish(t *testing.T) {
 	if resp.Code != http.StatusCreated {
 		t.Fatal("Failed to publish")
 	}
-	job, err := engine.GetEngineByKind(engine.KindRedis, "").Consume("ns", []string{"q16"}, 5, 2)
+	job, err := engine.GetEngine("").Consume("ns", []string{"q16"}, 5, 2)
 	if err != nil || string(job.Body()) != string(data) || job.TTL() != 10 || job.ID() == jobID {
 		t.Fatal("Failed to republish", job, err)
 	}
@@ -547,17 +544,18 @@ func TestPublishBulk(t *testing.T) {
 }
 
 func publishTestJob(ns, q string, delay, ttl uint32) (body []byte, jobID string) {
-	e := engine.GetEngineByKind(engine.KindRedis, "")
+	e := engine.GetEngine("")
 	body = make([]byte, 10)
 	if _, err := rand.Read(body); err != nil {
 		panic(err)
 	}
-	jobID, _ = e.Publish(ns, q, body, ttl, delay, 1)
+	j := engine.NewJob(ns, q, body, ttl, delay, 1, "")
+	jobID, _ = e.Publish(j)
 	return body, jobID
 }
 
 func consumeTestJob(ns, q string, ttr, timeout uint32) (body []byte, jobID string) {
-	e := engine.GetEngineByKind(engine.KindRedis, "")
+	e := engine.GetEngine("")
 	job, _ := e.Consume(ns, []string{q}, ttr, timeout)
 	if job == nil {
 		return nil, ""
